@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using Dapper;
 using DotNetApi.Data;
 using DotNetApi.Dtos;
 using DotNetApi.Helpers;
@@ -31,7 +32,7 @@ namespace DotNetApi.Controllers
 
         [AllowAnonymous]
         [HttpPost("Register")]
-        public IActionResult Register(UserForRegistrationDto userForRegistrationDto)
+        public async Task<IActionResult> Register(UserForRegistrationDto userForRegistrationDto)
         {
             if (userForRegistrationDto.Password != userForRegistrationDto.PasswordConfirm)
             {
@@ -45,42 +46,31 @@ namespace DotNetApi.Controllers
                 return BadRequest("User already exists with this email");
             }
 
-            byte[] passwordSalt = new byte[128 / 8];
-            using (var rng = RandomNumberGenerator.Create())
-            {
-                rng.GetNonZeroBytes(passwordSalt);
-            }
-
-            byte[] passwordHash = _authHelper.GetPasswordHash(userForRegistrationDto.Password, passwordSalt);
-
-            string sqlAddAuth = "INSERT INTO TutorialAppSchema.Auth (Email, PasswordHash, PasswordSalt) VALUES (@Email, @PasswordHash, @PasswordSalt)";
-            var parameters = new
+            UserForLoginDto userForLoginDto = new()
             {
                 Email = userForRegistrationDto.Email,
-                PasswordHash = passwordHash,
-                PasswordSalt = passwordSalt
+                Password = userForRegistrationDto.Password
             };
-            var insertSuccess = _dapper.ExecuteSql(sqlAddAuth, parameters);
+            bool insertSuccess = await _authHelper.SetPassword(userForLoginDto);
 
             if (!insertSuccess)
             {
                 return StatusCode(500, "Internal server error");
             }
 
-            string sqlAddUser = @"
-                INSERT INTO TutorialAppSchema.Users (
-                    [FirstName],
-                    [LastName],
-                    [Email],
-                    [Gender],
-                    [Active]
-                ) VALUES (
-                    '" + userForRegistrationDto.FirstName + @"',
-                    '" + userForRegistrationDto.LastName + @"',
-                    '" + userForRegistrationDto.Email + @"',
-                    '" + userForRegistrationDto.Gender + @"',
-                    " + 1 + ")";
-            if (!_dapper.ExecuteSql(sqlAddUser))
+            string sqlAddUser = "TutorialAppSchema.spUser_Upsert @FirstName, @LastName, @Email, @Gender, @JobTitle, @Department, @Salary, @Active";
+            var insertParameters = new
+            {
+                userForRegistrationDto.FirstName,
+                userForRegistrationDto.LastName,
+                userForRegistrationDto.Email,
+                userForRegistrationDto.Gender,
+                userForRegistrationDto.JobTitle,
+                userForRegistrationDto.Department,
+                userForRegistrationDto.Salary,
+                Active = 1,
+            };
+            if (!await _dapper.ExecuteSqlAsync(sqlAddUser, insertParameters))
             {
                 return StatusCode(500, "Failed to add user");
             }
@@ -88,13 +78,28 @@ namespace DotNetApi.Controllers
             return Ok();
         }
 
+        [HttpPut("ResetPassword")]
+        public async Task<IActionResult> ResetPassword(UserForLoginDto userForLoginDto)
+        {
+            bool updateSuccess = await _authHelper.SetPassword(userForLoginDto);
+
+            if (!updateSuccess)
+            {
+                return StatusCode(500, "Failed to update password");
+            }
+
+            return Ok("Password updated successfully");
+        }
+
         [AllowAnonymous]
         [HttpPost("Login")]
-        public IActionResult Login(UserForLoginDto userForLoginDto)
+        public async Task<IActionResult> Login(UserForLoginDto userForLoginDto)
         {
-            string sqlForHashAndSalt = "SELECT PasswordHash, PasswordSalt FROM TutorialAppSchema.Auth WHERE Email = @Email";
-            UserForLoginConfirmationDto? userForConfirmationDto = _dapper
-                .LoadDataSingleWithParams<UserForLoginConfirmationDto>(sqlForHashAndSalt, new { userForLoginDto.Email });
+            string sqlForHashAndSalt = "EXEC TutorialAppSchema.spLoginConfirmation_Get @Email=@EmailParam";
+            DynamicParameters parameters = new();
+            parameters.Add("EmailParam", userForLoginDto.Email, System.Data.DbType.String);
+            UserForLoginConfirmationDto? userForConfirmationDto = await _dapper
+                .LoadDataSingleWithParamsAsync<UserForLoginConfirmationDto>(sqlForHashAndSalt, parameters);
 
             if (userForConfirmationDto == null)
             {
@@ -109,9 +114,7 @@ namespace DotNetApi.Controllers
             }
 
             string sqlForUserId = "SELECT UserId FROM TutorialAppSchema.Users WHERE Email = @Email";
-            int userId = _dapper.LoadDataSingleWithParams<int>(sqlForUserId, new { userForLoginDto.Email });
-
-
+            int userId = await _dapper.LoadDataSingleWithParamsAsync<int>(sqlForUserId, new { userForLoginDto.Email });
 
             return Ok(new Dictionary<string, string>
             {
