@@ -2,10 +2,12 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using AutoMapper;
 using Dapper;
 using DotNetApi.Data;
 using DotNetApi.Dtos;
 using DotNetApi.Helpers;
+using DotNetApi.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cryptography.KeyDerivation;
 using Microsoft.AspNetCore.Mvc;
@@ -22,12 +24,19 @@ namespace DotNetApi.Controllers
         private readonly DataContextDapper _dapper;
         private readonly IConfiguration _config;
         private readonly AuthHelper _authHelper;
+        private readonly ReusableSql _reusableSql;
+        private readonly IMapper _mapper;
 
         public AuthController(IConfiguration config)
         {
             _config = config;
             _dapper = new DataContextDapper(_config);
             _authHelper = new AuthHelper(_config);
+            _reusableSql = new ReusableSql(_config);
+            _mapper = new Mapper(new MapperConfiguration(cfg =>
+            {
+                cfg.CreateMap<UserForRegistrationDto, UserComplete>();
+            }));
         }
 
         [AllowAnonymous]
@@ -58,24 +67,15 @@ namespace DotNetApi.Controllers
                 return StatusCode(500, "Internal server error");
             }
 
-            string sqlAddUser = "TutorialAppSchema.spUser_Upsert @FirstName, @LastName, @Email, @Gender, @JobTitle, @Department, @Salary, @Active";
-            var insertParameters = new
+            UserComplete userComplete = _mapper.Map<UserComplete>(userForRegistrationDto);
+            userComplete.Active = true;
+
+            if(!await _reusableSql.UpsertUser(userComplete))
             {
-                userForRegistrationDto.FirstName,
-                userForRegistrationDto.LastName,
-                userForRegistrationDto.Email,
-                userForRegistrationDto.Gender,
-                userForRegistrationDto.JobTitle,
-                userForRegistrationDto.Department,
-                userForRegistrationDto.Salary,
-                Active = 1,
-            };
-            if (!await _dapper.ExecuteSqlAsync(sqlAddUser, insertParameters))
-            {
-                return StatusCode(500, "Failed to add user");
+                return StatusCode(500, "Internal server error");
             }
 
-            return Ok();
+            return Ok("User registered successfully");
         }
 
         [HttpPut("ResetPassword")]
